@@ -97,6 +97,7 @@ def download_from_generate(
 
     # Ensure the directory exists
     os.makedirs(temp_dir, exist_ok=True)
+    print("temp dir:", temp_dir)
 
     # Check if cache exists
     cache_exists = os.path.exists(destination)

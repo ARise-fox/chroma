@@ -77,6 +77,90 @@ def letter_to_point_cloud(
     return X_point_cloud
 
 
+import numpy as np
+from PIL import Image
+
+
+def fig_to_point_cloud(
+        image_path,
+        width_pixels=None,
+        height_pixels=None,
+        depth_ratio=0.15,
+        threshold=100.0,
+        max_points=2000,
+):
+    """
+    Build a point cloud from the black pixels of an input image.
+
+    参数:
+        image_path (str): 输入图片的本地路径
+        width_pixels (int): 点云生成的参考宽度像素。若为 None 则保持原比例或使用原尺寸。
+        height_pixels (int): 点云生成的参考高度像素。若为 None 则保持原比例或使用原尺寸。
+        depth_ratio (float): 深度比例（控制点云在 Z 轴的厚度，基于调整后的图片宽度计算）
+        threshold (float): 灰度阈值，低于该值的像素将被认为是“黑色” (0-255)
+        max_points (int): 提取的最大点数，超过则随机下采样
+    """
+    # 1. 加载图片并统一转为 RGBA 格式
+    raw_image = Image.open(image_path).convert("RGBA")
+
+    # ====== 新增：图片尺寸调整逻辑 ======
+    orig_w, orig_h = raw_image.size
+
+    if width_pixels is not None or height_pixels is not None:
+        if width_pixels is not None and height_pixels is not None:
+            # 如果都指定了，强制缩放到指定宽高
+            new_w, new_h = width_pixels, height_pixels
+        elif width_pixels is not None:
+            # 如果只指定了宽度，按原图比例自动计算高度
+            new_w = width_pixels
+            new_h = int(orig_h * (width_pixels / orig_w))
+        else:
+            # 如果只指定了高度，按原图比例自动计算宽度
+            new_h = height_pixels
+            new_w = int(orig_w * (height_pixels / orig_h))
+
+        # 兼容不同版本的 Pillow
+        resample_method = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+        raw_image = raw_image.resize((new_w, new_h), resample_method)
+    # ====================================
+
+    # 2. 处理透明背景：将透明区域替换为纯白色
+    image = Image.new("RGBA", raw_image.size, (255, 255, 255, 255))
+    image.paste(raw_image, (0, 0), raw_image)  # 使用原图的 Alpha 通道作为掩码
+    image = image.convert("RGB")  # 最终转为没有透明度的 RGB 图像
+
+    # 3. 将图像转为 Numpy 数组，并沿通道维度求平均，得到二维灰度图
+    A = np.asarray(image).mean(-1)
+
+    # 4. 二值化：过滤出颜色较深的像素（即“黑色”部分）
+    A = A < threshold
+
+    # 如果图片全白，找不到黑色像素，提前返回空数组
+    if not A.any():
+        print("警告: 在图片中没有找到低于阈值的深色像素！")
+        return np.empty((0, 3))
+
+    # 5. 根据实际处理后的图片宽度和 depth_ratio 计算 Z 轴的深度层数
+    final_width = A.shape[1]
+    depth = max(1, int(depth_ratio * final_width))  # 保证至少有 1 层厚度
+
+    # 6. 将二维布尔矩阵扩展为三维体素网格（沿 Z 轴复制 depth 次）
+    V = np.ones(list(A.shape[:2]) + [depth]) * A[:, :, None]
+
+    # 7. 获取所有值为 1 的体素坐标 (y, x, z) 作为点云
+    X_point_cloud = np.stack(np.nonzero(V), 1)
+
+    # 8. 均匀去量化（加入随机抖动消除网格感）
+    X_point_cloud = X_point_cloud + np.random.rand(*X_point_cloud.shape)
+
+    # 9. 随机下采样（限制最大点数）
+    if max_points is not None and X_point_cloud.shape[0] > max_points:
+        np.random.shuffle(X_point_cloud)
+        X_point_cloud = X_point_cloud[:max_points, :]
+
+    return X_point_cloud
+
+
 def point_cloud_rescale(
     X, num_residues, neighbor_k=8, volume_per_residue=128.57, scale_ratio=0.4
 ):
